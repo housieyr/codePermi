@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "801275508814",
+    "firebase_url": "https://permi-app-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "permi-app",
+    "storage_bucket": "permi-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:801275508814:android:8ccca4615a207df32f6b1f",
+        "android_client_info": {
+          "package_name": "com.housie.permi.permi_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3wfi-OM4Y9gPJWRi85LVUmEoDeMxT-n0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
