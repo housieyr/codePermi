@@ -27,7 +27,7 @@ android {
         applicationId = "com.housie.permi.permi_app"
         minSdk = 23
         targetSdk = 36
-        versionCode = 1
+        versionCode = 2
         versionName = "0.0.2"
     }
     compileOptions {

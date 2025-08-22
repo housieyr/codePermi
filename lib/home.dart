@@ -117,7 +117,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   child: Image.asset('assets/a.png'),
                                 ),
                               ),
-                              SizedBox(width: 12),
+                     
                               Expanded(
                                 child: Column(
                                   children: [
