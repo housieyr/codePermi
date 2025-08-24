@@ -1,0 +1,20 @@
+workflows:
+  ios-simulator-15-pro-max:
+    name: iOS Simulator (iPhone 15 Pro Max)
+    environment:
+      xcode: latest
+    scripts:
+      - name: Build for iPhone 15 Pro Max Simulator
+        script: |
+          set -e
+          BUILD_DIR="$CM_BUILD_DIR/build"
+          xcodebuild \
+            -scheme "YourScheme" \        # change this
+            -workspace "YourApp.xcworkspace" \   # or -project if no workspace
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 15 Pro Max,OS=latest' \
+            BUILD_DIR="$BUILD_DIR" \
+            build
+    artifacts:
+      - build/Debug-iphonesimulator/*.app
