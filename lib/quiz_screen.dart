@@ -1,5 +1,5 @@
 import 'dart:convert';
- 
+import 'dart:io' show Platform;
 
 import 'package:connectivity_widget/connectivity_widget.dart';
 import 'package:flutter/material.dart';
@@ -7,13 +7,13 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_skeleton_ui/flutter_skeleton_ui.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
-import 'package:lottie/lottie.dart';  
+import 'package:lottie/lottie.dart';
 import 'package:percent_indicator/circular_percent_indicator.dart';
-import 'package:permi_app/ad_helper.dart'; 
+import 'package:permi_app/ad_helper.dart';
+import 'package:permi_app/controller.dart';
 import 'package:permi_app/data.dart';
 import 'package:permi_app/main.dart';
 import 'package:responsive_sizer/responsive_sizer.dart' show DeviceExt;
-import 'package:shared_preferences/shared_preferences.dart';
 
 class QuizBody extends StatefulWidget {
   final int x;
@@ -33,28 +33,60 @@ class QuizBody extends StatefulWidget {
   State<QuizBody> createState() => _QuizBodyState();
 }
 
-class _QuizBodyState extends State<QuizBody> with SingleTickerProviderStateMixin {
-
- InterstitialAd? _interstitialAd;
+class _QuizBodyState extends State<QuizBody>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  // ========== Ads ==========
+  InterstitialAd? _interstitialAd;
   bool _isInterstitialReady = false;
 
   void _loadInterstitial() {
     InterstitialAd.load(
-      adUnitId: AdHelper.interstitialAdUnitId, // add this in AdHelper
+      adUnitId: AdHelper.interstitialAdUnitId,
       request: const AdRequest(),
       adLoadCallback: InterstitialAdLoadCallback(
         onAdLoaded: (ad) {
           _interstitialAd = ad;
           _isInterstitialReady = true;
         },
-        onAdFailedToLoad: (err) {
+        onAdFailedToLoad: (_) {
           _interstitialAd = null;
           _isInterstitialReady = false;
         },
       ),
     );
   }
-  
+
+  bool _shouldShowInterstitialFor(int i) => i == 3 || i == 13 || i == 23;
+
+  void _showInterstitialThen(Future<void> Function() after) {
+    if (_isInterstitialReady && _interstitialAd != null) {
+      // stop any ongoing speech before ad takes the screen/audio focus
+      _stopTts();
+
+      _interstitialAd!.fullScreenContentCallback = FullScreenContentCallback(
+        onAdDismissedFullScreenContent: (ad) {
+          ad.dispose();
+          _interstitialAd = null;
+          _isInterstitialReady = false;
+          _loadInterstitial(); // queue next one
+          after();
+        },
+        onAdFailedToShowFullScreenContent: (ad, _) {
+          ad.dispose();
+          _interstitialAd = null;
+          _isInterstitialReady = false;
+          _loadInterstitial();
+          after();
+        },
+      );
+      _interstitialAd!.show();
+      _isInterstitialReady = false; // prevent double show
+    } else {
+      after();
+    }
+  }
+
+  // ========== Data / UI state ==========
   List<Answer> answers = [];
   String questionText = '';
   String explanation = '';
@@ -66,14 +98,84 @@ class _QuizBodyState extends State<QuizBody> with SingleTickerProviderStateMixin
   bool isFavorited = false;
   late String _imagePath;
 
-  // --- Timer ---
+  // ========== Timer ==========
   late AnimationController _controller;
   late AnimationStatusListener _timerListener;
 
-  // --- TTS ---
-  late final FlutterTts _tts;
+  // ========== TTS ==========
+  FlutterTts? _tts;
+  Future<void>? _ttsInitOnce;
+  bool _ttsReady = false;
 
-  // local quiz progress (no routing)
+  Future<void> _ensureTts() async {
+    if (_ttsInitOnce != null) {
+      await _ttsInitOnce;
+      return;
+    }
+
+    _tts = FlutterTts();
+
+    _ttsInitOnce = () async {
+      try {
+        if (Platform.isAndroid) {
+          try {
+            await _tts!.setEngine('com.google.android.tts');
+          } catch (_) {}
+        }
+        if (Platform.isIOS) {
+          try {
+            await _tts!.setSharedInstance(true);
+          } catch (_) {}
+        }
+
+        // Choose a supported Arabic locale (fallback list)
+        final candidates = <String>['ar-TN', 'ar', 'ar-SA', 'ar-EG'];
+        var chosen = 'ar';
+        for (final c in candidates) {
+          try {
+            final ok = await _tts!.isLanguageAvailable(c);
+            if (ok == true) {
+              chosen = c;
+              break;
+            }
+          } catch (_) {}
+        }
+
+        await _tts!.setLanguage(chosen);
+        await _tts!.setSpeechRate(0.5);
+        await _tts!.setPitch(1.0);
+        await _tts!.setVolume(1.0);
+        await _tts!.awaitSpeakCompletion(true);
+
+        _ttsReady = true;
+      } catch (_) {
+        _ttsReady = false;
+      }
+    }();
+
+    await _ttsInitOnce;
+  }
+
+  Future<void> _speak(String text) async {
+    if (text.trim().isEmpty) return;
+    await _ensureTts();
+    if (!_ttsReady || _tts == null) return;
+
+    try {
+      await _tts!.stop();
+      await _tts!.speak(text);
+    } catch (_) {
+      // ignore transient failures
+    }
+  }
+
+  Future<void> _stopTts() async {
+    try {
+      await _tts?.stop();
+    } catch (_) {}
+  }
+
+  // ========== Quiz progress ==========
   late int _i;
   late int _score;
   late bool _withCorrection;
@@ -87,34 +189,51 @@ class _QuizBodyState extends State<QuizBody> with SingleTickerProviderStateMixin
     return seconds.toString().padLeft(2, '0');
   }
 
+  // online/offline
+  bool connected = true;
+  bool _wasTimerRunningBeforeDisconnect = false;
+
+  // ========== Lifecycle ==========
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     _i = widget.startI;
     _score = widget.startScore;
     _withCorrection = widget.withCorrection;
-  _loadInterstitial();
+
+    _loadInterstitial();
+
     _imagePath = 'assets/exams/exam${widget.x}/$_i.jpg';
 
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 30),
+      duration: Duration(seconds: box.read('second') ?? 30),
     )..value = 1.0;
 
     _timerListener = (status) {
-    if (!mounted) return;
-    if (_isBootstrappingTimer) return;                // ignore internal resets
-    if (status == AnimationStatus.dismissed) {
-      _goNext();
-    }
-  };
+      if (!mounted) return;
+      // auto-next when timer finishes
+      if (status == AnimationStatus.dismissed) {
+        _goNext();
+      }
+    };
     _controller.addStatusListener(_timerListener);
 
-    _tts = FlutterTts();
-    _initTts();
+    // Defer TTS init (avoid blocking startup)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _ensureTts();
+    });
 
     loadQuestion();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
+      _stopTts();
+    }
   }
 
   @override
@@ -123,61 +242,24 @@ class _QuizBodyState extends State<QuizBody> with SingleTickerProviderStateMixin
     precacheImage(AssetImage('assets/exams/exam${widget.x}/$_i.jpg'), context);
   }
 
-  Future<void> _initTts() async {
-    await _tts.setLanguage('ar-TN');
-    await _tts.setSpeechRate(0.5);
-    await _tts.setPitch(1.0);
-    await _tts.setVolume(1.0);
-    await _tts.awaitSpeakCompletion(true);
-  }
-
-  Future<void> _speak(String text) async {
-    if (text.trim().isEmpty) return;
-    await _tts.stop();
-    await _tts.speak(text);
-  }
-
-  Future<void> _stopTts() => _tts.stop();
-  bool _shouldShowInterstitialFor(int i) => i == 0 || i == 10 || i == 20;
-
-  void _showInterstitialThen(Future<void> Function() after) {
-    if (_isInterstitialReady && _interstitialAd != null) {
-      _interstitialAd!.fullScreenContentCallback = FullScreenContentCallback(
-        onAdDismissedFullScreenContent: (ad) {
-          ad.dispose();
-          _interstitialAd = null;
-          _isInterstitialReady = false;
-          _loadInterstitial();        // queue next interstitial
-          after();                    // continue flow
-        },
-        onAdFailedToShowFullScreenContent: (ad, err) {
-          ad.dispose();
-          _interstitialAd = null;
-          _isInterstitialReady = false;
-          _loadInterstitial();
-          after();
-        },
-      );
-      _interstitialAd!.show();
-      _isInterstitialReady = false;   // prevent double show
-    } else {
-      after();
-    }
-  }
   @override
-  void dispose() { _interstitialAd?.dispose();
+  void dispose() {
+    _interstitialAd?.dispose();
     _controller.removeStatusListener(_timerListener);
     _controller.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     _stopTts();
+    _tts = null;
     super.dispose();
   }
-bool _isBootstrappingTimer = false;
-  // ======================= LOAD QUESTION =======================
+
+  // ========== Load Question ==========
   Future<void> loadQuestion() async {
-      _isBootstrappingTimer = true;
+    await _stopTts(); // ensure no overlap from previous question
+
     try {
       final jsonStr = await rootBundle.loadString('assets/data/bandito.json');
-      final Map<String, dynamic> root = jsonDecode(jsonStr);
+      final Map<String, dynamic> root = jsonDecode(jsonStr) as Map<String, dynamic>;
 
       final exKey = 'ex${widget.x}';
       final qKey = '$_i';
@@ -190,10 +272,12 @@ bool _isBootstrappingTimer = false;
         return;
       }
 
-      final rawAnswers = (q['answers'] as List<dynamic>).map((a) {
-        final m = a as Map<String, dynamic>;
-        return Answer(text: m['text'] ?? '', isCorrect: m['isCorrect'] == true);
-      }).toList()
+      final rawAnswers = (q['answers'] as List<dynamic>)
+          .map((a) {
+            final m = a as Map<String, dynamic>;
+            return Answer(text: m['text'] ?? '', isCorrect: m['isCorrect'] == true);
+          })
+          .toList()
         ..shuffle();
 
       if (!mounted) return;
@@ -212,26 +296,28 @@ bool _isBootstrappingTimer = false;
 
       // restart timer for this question
       _controller.stop();
-  _controller.value = 1.0;
-  _isBootstrappingTimer = false;
-  _controller.reverse(from: 1.0);
+      _controller.value = 1.0;
+      _controller.reverse(from: 1.0);
 
       if (!mounted) return;
       await checkIfFavorited();
 
-      if (mounted) precacheImage(AssetImage(_imagePath), context);
+      if (mounted) {
+        precacheImage(AssetImage(_imagePath), context);
+      }
     } catch (e) {
       debugPrint('❌ Error loading bandito.json: $e');
     }
   }
 
-  // ======================= FAVORITES =======================
+  // ========== Favorites ==========
   Future<void> checkIfFavorited() async {
-    final prefs = await SharedPreferences.getInstance();
-    final List<String> existing = prefs.getStringList('favorites') ?? [];
+    final List<String> existing =
+        (box.read('favorites') as List?)?.cast<String>() ?? const <String>[];
 
-    for (var item in existing) {
-      final favorite = FavoriteItem.fromJson(jsonDecode(item));
+    for (final item in existing) {
+      final favorite =
+          FavoriteItem.fromJson(jsonDecode(item) as Map<String, dynamic>);
       if (favorite.question == questionText) {
         if (!mounted) return;
         setState(() => isFavorited = true);
@@ -240,7 +326,7 @@ bool _isBootstrappingTimer = false;
     }
   }
 
-  // ======================= INTERACTION =======================
+  // ========== Interaction ==========
   void handleTap(int index) {
     if (!mounted) return;
     setState(() {
@@ -298,22 +384,20 @@ bool _isBootstrappingTimer = false;
       return;
     }
 
-  final nextI = _i + 1;
+    final nextI = _i + 1;
 
     setState(() {
       _score = newScore;
       _i = nextI;
     });
 
-    // If the arriving question index is 10 or 20, show ad first, then load
+    // If the arriving question index is ad-triggered, show ad first, then load
     if (_shouldShowInterstitialFor(nextI)) {
       _showInterstitialThen(() async {
         await loadQuestion();
         _movedNext = false;
       });
-    } else {
-      await loadQuestion();
-      _movedNext = false;
+      return; // IMPORTANT: avoid double load
     }
 
     await loadQuestion();
@@ -361,7 +445,7 @@ bool _isBootstrappingTimer = false;
                               Navigator.pop(context);
                               Navigator.pushAndRemoveUntil(
                                 context,
-                                MaterialPageRoute(builder: (_) => HomeScreenv()),
+                                MaterialPageRoute(builder: (_) => const HomeScreenv()),
                                 (_) => false,
                               );
                             },
@@ -484,7 +568,14 @@ bool _isBootstrappingTimer = false;
                                 children: [
                                   Expanded(
                                     child: OutlinedButton.icon(
-                                      onPressed: () => _speak(explanation),
+                                      onPressed: () async {
+                                        await _ensureTts();
+                                        if (!_ttsReady) {
+                                          showToast(context, "تعذّر تشغيل الصوت الآن", success: false);
+                                          return;
+                                        }
+                                        await _speak(explanation);
+                                      },
                                       icon: const Icon(Icons.volume_up),
                                       label: const Text('سماع التفسير'),
                                     ),
@@ -525,7 +616,9 @@ bool _isBootstrappingTimer = false;
       },
     );
   }
-Widget buildQuizUI(BuildContext context) {
+
+  // ========== UI ==========
+  Widget buildQuizUI(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final gradientColors = isDark
         ? [
@@ -586,7 +679,7 @@ Widget buildQuizUI(BuildContext context) {
                       onTap: () {
                         Navigator.pushAndRemoveUntil(
                           context,
-                          MaterialPageRoute(builder: (_) => HomeScreenv()),
+                          MaterialPageRoute(builder: (_) => const HomeScreenv()),
                           (route) => false,
                         );
                       },
@@ -617,32 +710,29 @@ Widget buildQuizUI(BuildContext context) {
                           assetPath: _imagePath,
                         );
 
-                        final prefs = await SharedPreferences.getInstance();
-                        final List<String> existing = prefs.getStringList('favorites') ?? [];
+                        final List<String> existing =
+                            (box.read('favorites') as List?)?.cast<String>() ?? const <String>[];
 
                         List<FavoriteItem> allItems = existing
-                            .map((e) => FavoriteItem.fromJson(jsonDecode(e)))
+                            .map((e) => FavoriteItem.fromJson(jsonDecode(e) as Map<String, dynamic>))
                             .toList();
 
                         if (isFavorited) {
                           allItems.removeWhere((f) => f.question == questionText);
-                          final updated = allItems.map((f) => jsonEncode(f.toJson())).toList();
-                          await prefs.setStringList('favorites', updated);
-
-                          if (!mounted) return;
-                          setState(() => isFavorited = false);
-                          if (!context.mounted) return;
-                          showToast(context, "تمت الإزالة من المفضلة", success: false);
                         } else {
                           allItems.add(item);
-                          final updated = allItems.map((f) => jsonEncode(f.toJson())).toList();
-                          await prefs.setStringList('favorites', updated);
-
-                          if (!mounted) return;
-                          setState(() => isFavorited = true);
-                          if (!context.mounted) return;
-                          showToast(context, "تمت الإضافة إلى المفضلة", success: true);
                         }
+
+                        final updated = allItems.map((f) => jsonEncode(f.toJson())).toList();
+                        await box.write('favorites', updated);
+
+                        if (!mounted) return;
+                        setState(() => isFavorited = !isFavorited);
+                        showToast(
+                          context,
+                          isFavorited ? "تمت الإضافة إلى المفضلة" : "تمت الإزالة من المفضلة",
+                          success: isFavorited,
+                        );
                       },
                       child: Container(
                         width: 4.5.h,
@@ -667,7 +757,8 @@ Widget buildQuizUI(BuildContext context) {
               // Main quiz card
               Stack(
                 children: [
-                  Container(height:77.h,
+                  Container(
+                    height: 77.h,
                     margin: EdgeInsets.only(top: 4.h, left: 2.h, right: 2.h),
                     decoration: BoxDecoration(
                       color: cardColor,
@@ -695,98 +786,102 @@ Widget buildQuizUI(BuildContext context) {
                             ),
                           ),
                         ),
-              
+
                         // question + options
                         Column(
-                                children: [
-                                  Container(
-                                    height: 9.h,
-                                    margin: EdgeInsets.symmetric(horizontal: 2.h, vertical: 0.5.h),
-                                    child: Center(
-                                      child: Directionality(
-                                        textDirection: TextDirection.rtl,
-                                        child: Text(
-                                          questionText,
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(fontSize: 2.h),
+                          children: [
+                            Container(
+                              height: 9.h,
+                              margin: EdgeInsets.symmetric(horizontal: 2.h, vertical: 0.5.h),
+                              child: Center(
+                                child: Directionality(
+                                  textDirection: TextDirection.rtl,
+                                  child: Text(
+                                    questionText,
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(fontSize: 2.h),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            ListView.builder(
+                              itemCount: options.length,
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              itemBuilder: (context, index) {
+                                final baseFill = isDark ? Colors.black26 : Colors.white;
+                                final baseBorder = isDark ? Colors.black : Colors.black12;
+
+                                Color bg = baseFill;
+                                Color border = baseBorder;
+
+                                if (!_graded) {
+                                  if (index == selectedIndex) {
+                                    if (!isDark) bg = const Color(0xFFF4EEB6);
+                                    border = Colors.yellow;
+                                  }
+                                } else {
+                                  if (!_withCorrection) {
+                                    if (index == selectedIndex) {
+                                      if (!isDark) bg = const Color(0xFFF4EEB6);
+                                      border = Colors.yellow;
+                                    }
+                                  } else {
+                                    if (index == correctIndex) {
+                                      if (!isDark) bg = const Color(0xffbfffef);
+                                      border = Colors.green;
+                                    } else if (index == selectedIndex &&
+                                        selectedIndex != correctIndex) {
+                                      if (!isDark) bg = const Color(0xffffbfbf);
+                                      border = Colors.red;
+                                    }
+                                  }
+                                }
+
+                                return GestureDetector(
+                                  onTap: () => handleTap(index),
+                                  child: Container(
+                                    margin: EdgeInsets.symmetric(vertical: 0.5.h, horizontal: 2.5.h),
+                                    padding: EdgeInsets.symmetric(vertical: 1.3.h, horizontal: 12),
+                                    decoration: BoxDecoration(
+                                      color: bg,
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: border, width: 0.25.h),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        getIcon(index),
+                                        Expanded(
+                                          child: Directionality(
+                                            textDirection: TextDirection.rtl,
+                                            child: Text(
+                                              options[index],
+                                              textAlign: TextAlign.start,
+                                              style: TextStyle(
+                                                  color:
+                                                      isDark ? Colors.white : Colors.black),
+                                            ),
+                                          ),
                                         ),
-                                      ),
+                                        const SizedBox(width: 12),
+                                        Text(
+                                          ['- أ', '- ب', '- ج'][index],
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 2.h,
+                                            color: textColor,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                      ],
                                     ),
                                   ),
-                                  ListView.builder(
-                                    itemCount: options.length,
-                                    shrinkWrap: true,
-                                    itemBuilder: (context, index) {
-                                      final baseFill = isDark ? Colors.black26 : Colors.white;
-                                      final baseBorder = isDark ? Colors.black : Colors.black12;
-                                      
-                                      Color bg = baseFill;
-                                      Color border = baseBorder;
-                                      
-                                      if (!_graded) {
-                                        if (index == selectedIndex) {
-                                          if (!isDark) bg = const Color(0xFFF4EEB6);
-                                          border = Colors.yellow;
-                                        }
-                                      } else {
-                                        if (!_withCorrection) {
-                                          if (index == selectedIndex) {
-                                            if (!isDark) bg = const Color(0xFFF4EEB6);
-                                            border = Colors.yellow;
-                                          }
-                                        } else {
-                                          if (index == correctIndex) {
-                                            if (!isDark) bg = const Color(0xffbfffef);
-                                            border = Colors.green;
-                                          } else if (index == selectedIndex && selectedIndex != correctIndex) {
-                                            if (!isDark) bg = const Color(0xffffbfbf);
-                                            border = Colors.red;
-                                          }
-                                        }
-                                      }
-                                      
-                                      return GestureDetector(
-                                        onTap: () => handleTap(index),
-                                        child: Container(
-                                          margin: EdgeInsets.symmetric(vertical: 0.5.h, horizontal: 2.5.h),
-                                          padding: EdgeInsets.symmetric(vertical: 1.3.h, horizontal: 12),
-                                          decoration: BoxDecoration(
-                                            color: bg,
-                                            borderRadius: BorderRadius.circular(12),
-                                            border: Border.all(color: border, width: 0.25.h),
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              getIcon(index),
-                                              Expanded(
-                                                child: Directionality(
-                                                  textDirection: TextDirection.rtl,
-                                                  child: Text(
-                                                    options[index],
-                                                    textAlign: TextAlign.start,
-                                                    style: TextStyle(color: isDark ? Colors.white : Colors.black),
-                                                  ),
-                                                ),
-                                              ),
-                                              const SizedBox(width: 12),
-                                              Text(
-                                                ['- أ', '- ب', '- ج'][index],
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 2.h,
-                                                  color: textColor,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 12),
-                                            ],
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ],
-                              ),
-              
+                                );
+                              },
+                            ),
+                          ],
+                        ),
+
                         // next button
                         Padding(
                           padding: EdgeInsets.only(top: 3.h),
@@ -797,22 +892,22 @@ Widget buildQuizUI(BuildContext context) {
                                 await _showMustChooseDialog();
                                 return;
                               }
-              
+
                               // If time ended: just proceed
                               if (_controller.isDismissed) {
                                 _goNext();
                                 return;
                               }
-              
+
                               final isCorrect = selectedIndex == correctIndex;
-              
+
                               setState(() => _graded = true);
-              
+
                               if (!_withCorrection) {
                                 _goNext();
                                 return;
                               }
-              
+
                               if (!isCorrect) {
                                 _controller.stop();
                                 _showExplanationCard(); // "فهمتك" calls _goNext()
@@ -833,9 +928,8 @@ Widget buildQuizUI(BuildContext context) {
                                 ),
                                 borderRadius: BorderRadius.circular(20),
                                 boxShadow: [
-                                  // Use withOpacity to keep compatibility
                                   BoxShadow(
-                                    color: Colors.orange.withValues(alpha: 0.4),
+                                    color: Colors.orange.withOpacity(0.4),
                                     blurRadius: 10,
                                     offset: const Offset(0, 5),
                                   ),
@@ -862,7 +956,7 @@ Widget buildQuizUI(BuildContext context) {
                       ],
                     ),
                   ),
-              
+
                   // timer bubble
                   Positioned(
                     top: 0,
@@ -870,7 +964,8 @@ Widget buildQuizUI(BuildContext context) {
                     child: Container(
                       height: 8.h,
                       width: 8.h,
-                      decoration: BoxDecoration(shape: BoxShape.circle, color: cardColor),
+                      decoration:
+                          BoxDecoration(shape: BoxShape.circle, color: cardColor),
                       child: AnimatedBuilder(
                         animation: _controller,
                         builder: (context, _) {
@@ -882,7 +977,8 @@ Widget buildQuizUI(BuildContext context) {
                               percent: p,
                               center: Text(
                                 timerString,
-                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 3.h),
+                                style: TextStyle(
+                                    fontWeight: FontWeight.bold, fontSize: 3.h),
                               ),
                               progressColor: const Color(0xFFFF6F00),
                             ),
@@ -898,118 +994,123 @@ Widget buildQuizUI(BuildContext context) {
         ),
       ],
     );
- 
-}bool connected = true;bool _wasTimerRunningBeforeDisconnect = false;
-  // ======================= BUILD =======================
+  }
+
+  // ========== Build ==========
   @override
   Widget build(BuildContext context) {
-return ConnectivityWidget(
-    onlineCallback: () {
-    setState(() {
-        connected = true;
+    return ConnectivityWidget(
+      onlineCallback: () {
+        setState(() {
+          connected = true;
 
-        // Resume timer if it was running before
-        if (_wasTimerRunningBeforeDisconnect && !_controller.isAnimating) {
-          _controller.reverse(from: _controller.value);
-        }
-      });
-    },
-    offlineCallback: () {
-       setState(() {
-        connected = false;
+          // Resume timer if it was running before
+          if (_wasTimerRunningBeforeDisconnect && !_controller.isAnimating) {
+            _controller.reverse(from: _controller.value);
+          }
+        });
+      },
+      offlineCallback: () {
+        setState(() {
+          connected = false;
 
-        // Pause the timer but remember if it was running
-        _wasTimerRunningBeforeDisconnect = _controller.isAnimating;
-        _controller.stop();
-      });
-    },
-    builder: (context, isOnline) {
-      if (!connected) {
-        return Stack(
-          children: [
-            // Skeleton loader
-            ListView.builder(
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: 6,
-              itemBuilder: (context, index) => Container(
-                color: Colors.white,
-                child: SkeletonItem(
-                  child: Column(
-                    children: [
-                      SizedBox(height: 6.h,),
-                      SkeletonLine(
-                        style: SkeletonLineStyle(
-                          height: 26.h,borderRadius: BorderRadius.circular(20),
-                          padding: EdgeInsets.symmetric(vertical: 4.5.h, horizontal: 2.h),
-                        ),
-                      ),
-                       SkeletonLine(
-                        style: SkeletonLineStyle(
-                          height: 3.7.h,
-                          width: 20.h,
-                          alignment: Alignment.centerRight,
-                          padding: EdgeInsets.only(right: 28  .w,bottom: 4 .h ),
-                        ),
-                      ),
-                      
-                      SkeletonLine(
-                        style: SkeletonLineStyle(
-                          height: 6 .h,    borderRadius: BorderRadius.circular(10),
-                          width: 100.w,
-                          alignment: Alignment.centerRight,
-                         padding: EdgeInsets.only(right: 4.h  ,left: 4.h,bottom: 1 .h ),
-                          
-                        ),
-                      ), 
-                      SkeletonLine(
-                        style: SkeletonLineStyle(
-                          height: 6 .h,
-                          width: 100.w, borderRadius: BorderRadius.circular(10),
-                          alignment: Alignment.centerRight,
-                  padding: EdgeInsets.only(right: 4.h  ,left: 4.h,bottom: 1 .h ),
-                          
-                        ),
-                      ),
+          // Pause the timer but remember if it was running
+          _wasTimerRunningBeforeDisconnect = _controller.isAnimating;
+          _controller.stop();
+        });
+      },
+      builder: (context, isOnline) {
+        if (!connected) {
+          return Stack(
+            children: [
+              // Skeleton loader
+              ListView.builder(
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: 6,
+                itemBuilder: (context, index) => Container(
+                  color: Colors.white,
+                  child: SkeletonItem(
+                    child: Column(
+                      children: [
+                        SizedBox(height: 6.h),
                         SkeletonLine(
-                        style: SkeletonLineStyle(
-                          height: 6 .h,
-                          width: 100.w, borderRadius: BorderRadius.circular(10),
-                          alignment: Alignment.centerRight,
-                  padding: EdgeInsets.only(right: 4.h  ,left: 4.h,bottom: 1 .h ),
-                          
+                          style: SkeletonLineStyle(
+                            height: 26.h,
+                            borderRadius: BorderRadius.circular(20),
+                            padding: EdgeInsets.symmetric(
+                                vertical: 4.5.h, horizontal: 2.h),
+                          ),
                         ),
-                      ),
-                      SkeletonLine(
-                        style: SkeletonLineStyle(
-                          height: 7.h,
-                          width: 100.w, borderRadius: BorderRadius.circular(25),
-                          alignment: Alignment.centerRight,
-                  padding: EdgeInsets.only(right: 7.h  ,left: 7.h,top: 3.h ),
-                          
+                        SkeletonLine(
+                          style: SkeletonLineStyle(
+                            height: 3.7.h,
+                            width: 20.h,
+                            alignment: Alignment.centerRight,
+                            padding:
+                                EdgeInsets.only(right: 28.w, bottom: 4.h),
+                          ),
                         ),
-                      ),
-                  
-                    ],
+                        SkeletonLine(
+                          style: SkeletonLineStyle(
+                            height: 6.h,
+                            borderRadius: BorderRadius.circular(10),
+                            width: 100.w,
+                            alignment: Alignment.centerRight,
+                            padding:
+                                EdgeInsets.only(right: 4.h, left: 4.h, bottom: 1.h),
+                          ),
+                        ),
+                        SkeletonLine(
+                          style: SkeletonLineStyle(
+                            height: 6.h,
+                            width: 100.w,
+                            borderRadius: BorderRadius.circular(10),
+                            alignment: Alignment.centerRight,
+                            padding:
+                                EdgeInsets.only(right: 4.h, left: 4.h, bottom: 1.h),
+                          ),
+                        ),
+                        SkeletonLine(
+                          style: SkeletonLineStyle(
+                            height: 6.h,
+                            width: 100.w,
+                            borderRadius: BorderRadius.circular(10),
+                            alignment: Alignment.centerRight,
+                            padding:
+                                EdgeInsets.only(right: 4.h, left: 4.h, bottom: 1.h),
+                          ),
+                        ),
+                        SkeletonLine(
+                          style: SkeletonLineStyle(
+                            height: 7.h,
+                            width: 100.w,
+                            borderRadius: BorderRadius.circular(25),
+                            alignment: Alignment.centerRight,
+                            padding:
+                                EdgeInsets.only(right: 7.h, left: 7.h, top: 3.h),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
 
-            // Centered Lottie no-wifi animation
-            Center(
-              child: Lottie.asset('assets/wifi2.json', height: 30.h),
-            ),
-          ],
-        );
-      }
+              // Centered Lottie no-wifi animation
+              Center(
+                child: Lottie.asset('assets/wifi2.json', height: 30.h),
+              ),
+            ],
+          );
+        }
 
-      // ✅ If connected → return the normal quiz UI
-      return buildQuizUI(context);
-    },
-  );
-}
+        // If connected → return the normal quiz UI
+        return buildQuizUI(context);
+      },
+    );
+  }
 
-  // ======================= ICON =======================
+  // ========== Option Icon ==========
   Widget getIcon(int index) {
     if (!_graded) {
       return Container(
@@ -1042,7 +1143,6 @@ return ConnectivityWidget(
     );
   }
 }
-
 
 // ======================= FAVORITE MODEL + TOAST =======================
 class FavoriteItem {

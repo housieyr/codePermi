@@ -1,8 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:permi_app/controller.dart';
 import 'package:permi_app/quiz_screen.dart';
-import 'package:responsive_sizer/responsive_sizer.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:responsive_sizer/responsive_sizer.dart'; 
 
 class FavoritesScreen extends StatefulWidget {
   const FavoritesScreen({super.key});
@@ -17,31 +17,92 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   @override
   void initState() {
     super.initState();
-    loadFavorites();
+   // Re-run loader whenever 'favorites' changes (reset, add, remove…)
+  box.listenKey('favorites', (_) => loadFavorites());
+
+  loadFavorites();
   }
 
-  Future<void> loadFavorites() async {
-    final prefs = await SharedPreferences.getInstance();
-    final List<String> saved = prefs.getStringList('favorites') ?? [];
-    setState(() {
-      favorites = saved
-          .map((e) => FavoriteItem.fromJson(jsonDecode(e)))
-          .toList();
-    });
+Future<void> loadFavorites() async {
+  final raw = box.read('favorites');
+  final list = (raw as List?) ?? const <dynamic>[];
+
+  final items = <FavoriteItem>[];
+  for (final e in list) {
+    try {
+      if (e is String) {
+        items.add(
+          FavoriteItem.fromJson(jsonDecode(e) as Map<String, dynamic>),
+        );
+      } else if (e is Map) {
+        items.add(
+          FavoriteItem.fromJson(Map<String, dynamic>.from(e)),
+        );
+      }
+    } catch (_) {
+      // skip corrupt entries
+    }
   }
 
-  Future<void> removeFavorite(int index) async {
-    final prefs = await SharedPreferences.getInstance();
-    final List<String> saved = prefs.getStringList('favorites') ?? [];
-    saved.removeAt(index);
-    await prefs.setStringList('favorites', saved);
-    setState(() {
-      favorites.removeAt(index);
-    });
+  if (!mounted) return;
+  setState(() => favorites = items);
+}
+
+Future<void> removeFavorite(int index) async {
+  if (index < 0 || index >= favorites.length) return;
+
+  final target = favorites[index];
+
+  // Read raw list exactly as stored (could be List<String> or List<Map>)
+  final raw = (box.read('favorites') as List?)?.toList() ?? <dynamic>[];
+
+  // Find the raw index that corresponds to the tapped item.
+  // Prefer a stable key (savedAt). Fallback: (question + assetPath).
+  int rawIndex = -1;
+  for (int i = 0; i < raw.length; i++) {
+    try {
+      Map<String, dynamic> m;
+      final e = raw[i];
+      if (e is String) {
+        m = jsonDecode(e) as Map<String, dynamic>;
+      } else if (e is Map) {
+        m = Map<String, dynamic>.from(e);
+      } else {
+        continue;
+      }
+
+      final savedAtStr = m['savedAt']?.toString();
+      final savedAt = savedAtStr != null ? DateTime.tryParse(savedAtStr) : null;
+
+      final sameByTime = savedAt != null && savedAt.isAtSameMomentAs(target.savedAt);
+      final sameByContent =
+          (m['question']?.toString() == target.question) &&
+          (m['assetPath']?.toString() == target.assetPath);
+
+      if (sameByTime || sameByContent) {
+        rawIndex = i;
+        break;
+      }
+    } catch (_) {
+      // ignore bad entry
+    }
   }
+
+  // As a last resort, if sizes match perfectly, fall back to positional delete.
+  if (rawIndex == -1 && raw.length == favorites.length) {
+    rawIndex = index;
+  }
+
+  if (rawIndex == -1) return; // nothing matched; bail safely
+
+  raw.removeAt(rawIndex);
+  await box.write('favorites', raw); // triggers listenKey -> loadFavorites()
+  // No setState here; your listenKey('favorites', ...) will refresh the UI.
+}
 
   @override
   Widget build(BuildContext context) {
+   
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final gradientColors = isDark
         ? [
@@ -91,7 +152,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                 itemCount: favorites.length,
                 itemBuilder: (context, index) {
                   final item = favorites[index];
-                  return Card(
+                  return Card(  key: ValueKey(item.savedAt.microsecondsSinceEpoch), // or item.id
                     elevation: 5,
                     shadowColor: isDark ? Colors.white54 : Colors.black26,
                     margin: EdgeInsets.symmetric(

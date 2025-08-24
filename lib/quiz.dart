@@ -5,11 +5,12 @@ import 'package:responsive_sizer/responsive_sizer.dart' show DeviceExt ;
 
 enum QuizMode { withCorrection, test }
 
-class QuizModeScreen extends StatelessWidget {  final int x;
+class QuizModeScreen extends StatelessWidget {
+    final int x;
 
-  const QuizModeScreen({super.key, required this.x});
+ QuizModeScreen({super.key, required this.x});
 
-  void _start(BuildContext context, QuizMode mode) {
+  void _start(BuildContext context, QuizMode mode ) {
     final withCorrection = mode == QuizMode.withCorrection;
     Navigator.push(
       context,
@@ -17,15 +18,17 @@ class QuizModeScreen extends StatelessWidget {  final int x;
         builder: (_) => QuizScreen(
           x: x,           // <- set your exam set here
           i: 1,           // start at question 1
-          score: 0,       // start score
+          score: 0,      // start score
           withCorrection: withCorrection,
         ),
       ),
     );
   }
-
+  int  seconds=0;
+ 
   @override
   Widget build(BuildContext context) {
+ 
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final gradientColors = isDark
         ? [
@@ -109,7 +112,7 @@ class QuizModeScreen extends StatelessWidget {  final int x;
                         borderRadius: BorderRadius.circular(20),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha:0.15),
+                            color: Colors.black.withOpacity(0.15),
                             blurRadius: 18,
                             offset: const Offset(0, 8),
                           ),
@@ -146,7 +149,7 @@ class QuizModeScreen extends StatelessWidget {  final int x;
                                     Color(0xFF00C853), // green accent
                                     Color(0xFF64DD17),
                                   ],
-                                  onTap: () => _start(context, QuizMode.withCorrection),
+                                  onTap: () => _start(context, QuizMode.withCorrection  ),
                                 ), SizedBox(height: 2.5.h),
                                 _ModeCard(
                                   title: "اختبار حقيقي (بدون تصحيح)",
@@ -157,7 +160,7 @@ class QuizModeScreen extends StatelessWidget {  final int x;
                                     Color(0xFFFF6F00), // deep orange
                                     Color(0xFFFF9800), // amber
                                   ],
-                                  onTap: () => _start(context, QuizMode.test),
+                                  onTap: () => _start(context, QuizMode.test  ),
                                 ),
                               ],
                             ),
@@ -237,7 +240,7 @@ SizedBox(height: 3.h,),
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: gradient.last.withValues(alpha:0.35),
+                        color: gradient.last.withOpacity(0.35),
                         blurRadius: 14,
                         offset: const Offset(0, 6),
                       ),
@@ -252,7 +255,7 @@ SizedBox(height: 3.h,),
                     subtitle,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: textColor.withValues(alpha:0.8),
+                      color: textColor.withOpacity(0.8),
                       fontSize: 1.7.h,
                       height: 1.5,
                     ),

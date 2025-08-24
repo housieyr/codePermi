@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_core/firebase_core.dart'; 
+import 'package:get_storage/get_storage.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:permi_app/appOpenAds.dart';
 import 'package:upgrader/upgrader.dart';
 import 'package:responsive_sizer/responsive_sizer.dart';
 import 'package:animated_notch_bottom_bar/animated_notch_bottom_bar/animated_notch_bottom_bar.dart';
-
+import 'dart:async' show unawaited;
 import 'package:permi_app/ad_helper.dart';
 import 'package:permi_app/favorite.dart';
 import 'package:permi_app/home.dart';
@@ -15,9 +17,11 @@ import 'theme_manager.dart';
 final ThemeNotifier themeNotifier = ThemeNotifier();
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+ WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  await MobileAds.instance.initialize();
+  // لا تنتظر — يقلل حجز الـ UI thread
+  unawaited(MobileAds.instance.initialize());
+  await GetStorage.init('permi');
   runApp(QuizApp(themeNotifier: themeNotifier));
 }
 
@@ -32,7 +36,7 @@ class QuizApp extends StatelessWidget {
       builder: (context, themeMode, _) {
         return ResponsiveSizer(
           builder: (context, orientation, screenType) {
-            return MaterialApp(
+            return  MaterialApp(
               debugShowCheckedModeBanner: false,
               themeMode: themeMode,
               theme: ThemeData.light(),
@@ -61,86 +65,55 @@ class HomeScreenvState extends State<HomeScreenv> with WidgetsBindingObserver {
       NotchBottomBarController(index: 0);
 
   late final List<Widget> _screens;
+  int _currentIndex = 0; 
+  
+  
+    final _appOpenManager = AppOpenAdManager();
 
-  AppOpenAd? _appOpenAd;
-  bool _isAdAvailable = false;
-  bool _isShowingAd = false;
-  bool _firstFrameShown = false;
+  // Track when we left foreground
+  DateTime? _lastPausedAt;
 
-  int _currentIndex = 0;
+  // Only show app-open if backgrounded at least this long (tweak to taste)
+  static const Duration _minBackgroundForAppOpen = Duration(seconds: 5);
 
   @override
   void initState() {
     super.initState();
-    _screens = [HomeScreen(), FavoritesScreen(), SettingsScreen()];
     WidgetsBinding.instance.addObserver(this);
+    _screens = [HomeScreen(), FavoritesScreen(), SettingsScreen()];
 
-    // Avoid covering initial UI with an ad.
+    // Cold start: load and (optionally) auto-show when ready
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _firstFrameShown = true;
-      Future.delayed(const Duration(milliseconds: 900), _loadAppOpenAd);
+      // Optional: also set a cooldown in the manager, e.g. 3 minutes
+      // _appOpenManager.setMinInterval(const Duration(minutes: 3));
+      _appOpenManager.load(adUnitId: AdHelper.openAdUnitId, showOnLoad: true);
     });
-  }
-
-  void _loadAppOpenAd() {
-    _appOpenAd = null;
-    _isAdAvailable = false;
-
-    AppOpenAd.load(
-      adUnitId: AdHelper.openAdUnitId,
-      request: const AdRequest(),
-      adLoadCallback: AppOpenAdLoadCallback(
-        onAdLoaded: (ad) {
-          _appOpenAd = ad;
-          _isAdAvailable = true;
-          _maybeShowAd();
-        },
-        onAdFailedToLoad: (error) {
-          _isAdAvailable = false;
-        },
-      ),
-    );
-  }
-
-  void _maybeShowAd() {
-    if (!_isAdAvailable || _isShowingAd || !_firstFrameShown) return;
-    if (!mounted) return;
-
-    _appOpenAd?.fullScreenContentCallback = FullScreenContentCallback(
-      onAdShowedFullScreenContent: (ad) => _isShowingAd = true,
-      onAdFailedToShowFullScreenContent: (ad, error) => _resetAd(ad),
-      onAdDismissedFullScreenContent: (ad) {
-        _resetAd(ad);
-        // Optionally preload next ad for resume-only scenarios:
-        // _loadAppOpenAd();
-      },
-    );
-
-    _appOpenAd?.show();
-  }
-
-  void _resetAd(Ad ad) {
-    _isShowingAd = false;
-    _isAdAvailable = false;
-    _appOpenAd = null;
-    ad.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _firstFrameShown) {
-      if (!_isAdAvailable) _loadAppOpenAd();
-      _maybeShowAd();
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      // Mark when we left foreground
+      _lastPausedAt = DateTime.now();
+    } else if (state == AppLifecycleState.resumed) {
+      // Show only if we were away long enough (not just a short overlay)
+      final wasAwayLongEnough = _lastPausedAt != null &&
+          DateTime.now().difference(_lastPausedAt!) >= _minBackgroundForAppOpen;
+
+      if (wasAwayLongEnough) {
+        _appOpenManager.showIfAvailable();
+      }
+      // Clear so rapid resume/pauses don’t accumulate
+      _lastPausedAt = null;
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _appOpenAd?.dispose();
+    _appOpenManager.dispose();
     super.dispose();
   }
-
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -164,7 +137,7 @@ class HomeScreenvState extends State<HomeScreenv> with WidgetsBindingObserver {
                   boxShadow: [
                     BoxShadow(
                       color: const Color.fromARGB(255, 250, 247, 247)
-                          .withOpacity(0.1), // fixed (was withValues)
+                         .withOpacity(0.1), // fixed (was withValues)
                       spreadRadius: 0.2,
                       blurRadius: 10,
                       offset: const Offset(0, 0),

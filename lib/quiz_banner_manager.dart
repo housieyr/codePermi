@@ -52,31 +52,32 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   @override
-  Widget build(BuildContext context) { 
+  Widget build(BuildContext context) {
     return Scaffold(
       body: Stack(
         children: [
-          SizedBox(height: 100.h,
+          SizedBox(
+            height: 100.h,
             child: QuizBody(
               x: widget.x,
               startI: widget.i,
               startScore: widget.score,
+
               withCorrection: widget.withCorrection,
             ),
           ),
- 
-if (_isBannerAdReady)
-  Align(
-    alignment: Alignment.bottomCenter,
-    child: SizedBox(
-      width: _bannerAd.size.width.toDouble(),
-      height: _bannerAd.size.height.toDouble(),
-      child: AdWidget(ad: _bannerAd),
-    ),
-  ),
+
+          if (_isBannerAdReady)
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: SizedBox(
+                width: _bannerAd.size.width.toDouble(),
+                height: _bannerAd.size.height.toDouble(),
+                child: AdWidget(ad: _bannerAd),
+              ),
+            ),
         ],
       ),
-    
     );
   }
 }
